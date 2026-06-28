@@ -1,0 +1,9 @@
+[
+  {
+    "subscriptionKey": "autotsp-global",
+    "subscriptionId": "<your-subscription-guid>",
+    "cloud": "global",
+    "dailyPrefix": "focus-cost/autotsp-focus-cost-daily-parquet",
+    "monthlyPrefix": "focus-cost/autotsp-focus-cost-monthly-parquet"
+  }
+]

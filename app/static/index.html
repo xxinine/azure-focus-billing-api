@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FOCUS 账单 - 管理调试</title>
+  <style>
+    :root { --bd:#d0d7de; --bg:#f6f8fa; --pri:#0969da; --ok:#1a7f37; --err:#cf222e; }
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+           margin: 0; color: #1f2328; background: #fff; }
+    header { background: #24292f; color: #fff; padding: 12px 20px; font-size: 16px; font-weight: 600; }
+    .wrap { padding: 20px; max-width: 1200px; margin: 0 auto; }
+    .card { border: 1px solid var(--bd); border-radius: 8px; padding: 16px; margin-bottom: 20px; background: #fff; }
+    .card h2 { margin: 0 0 12px; font-size: 15px; }
+    .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+    .field { display: flex; flex-direction: column; gap: 4px; }
+    label { font-size: 12px; color: #57606a; }
+    input, select, button { padding: 7px 10px; border: 1px solid var(--bd); border-radius: 6px; font-size: 14px; }
+    button { background: var(--pri); color: #fff; border-color: var(--pri); cursor: pointer; font-weight: 600; }
+    button.secondary { background: #fff; color: var(--pri); }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+
+    /* segmented click selector (replaces dropdown) */
+    .seg { display: inline-flex; border: 1px solid var(--bd); border-radius: 6px; overflow: hidden; }
+    .seg label { margin: 0; }
+    .seg input { display: none; }
+    .seg span { display: block; padding: 7px 16px; font-size: 14px; cursor: pointer; color: #1f2328;
+                border-right: 1px solid var(--bd); user-select: none; }
+    .seg label:last-child span { border-right: none; }
+    .seg input:checked + span { background: var(--pri); color: #fff; font-weight: 600; }
+
+    /* text input + calendar picker combo (keeps YYYY-MM display) */
+    .combo { display: inline-flex; align-items: center; gap: 4px; position: relative; }
+    .combo input.txt { width: 130px; }
+    .cal { padding: 6px 8px; background: #fff; color: var(--pri); border: 1px solid var(--bd); }
+    .hiddenpick { position: absolute; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+
+    /* GET URL bar */
+    .urlbar { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+    .urlbar code { flex: 1; min-width: 280px; background: var(--bg); border: 1px solid var(--bd); border-radius: 6px;
+                   padding: 7px 10px; font-size: 12px; word-break: break-all; }
+
+    /* strong enable/disable contrast for the date / month fields */
+    input:disabled { background: #e7ebef; color: #aab2bb; border-color: #e1e5ea; opacity: 1; cursor: not-allowed; }
+    .field.dim label { color: #c2c8ce; }
+    .field.active label { color: var(--pri); font-weight: 700; }
+    .field.active input { border-color: var(--pri); box-shadow: 0 0 0 3px rgba(9,105,218,.18); }
+
+    .msg { margin-top: 10px; font-size: 13px; white-space: pre-wrap; }
+    .msg.ok { color: var(--ok); }
+    .msg.err { color: var(--err); }
+    .meta { font-size: 12px; color: #57606a; margin-top: 6px; }
+    table { border-collapse: collapse; width: 100%; font-size: 12px; margin-top: 10px; display: block; overflow-x: auto; }
+    th, td { border: 1px solid var(--bd); padding: 4px 8px; text-align: left; white-space: nowrap; }
+    th { background: var(--bg); position: sticky; top: 0; }
+    th.idx, td.idx { background: #eef1f4; color: #57606a; text-align: right; font-variant-numeric: tabular-nums; }
+    tr.colnum th { background: #e7ebef; color: #57606a; text-align: center; font-weight: 600; }
+    .pager { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+    .pill { background: var(--bg); border: 1px solid var(--bd); border-radius: 12px; padding: 2px 10px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>FOCUS 账单 · 管理调试界面</header>
+  <div class="wrap">
+
+    <div class="card">
+      <h2>1. 手动拉取账单（摄取 Raw → Curated）</h2>
+      <div class="row">
+        <div class="field">
+          <label>数据集</label>
+          <div class="seg" id="ingDataset">
+            <label><input type="radio" name="ingDs" value="daily" checked /><span>日账单 daily</span></label>
+            <label><input type="radio" name="ingDs" value="monthly" /><span>月账单 monthly</span></label>
+          </div>
+        </div>
+        <div class="field">
+          <label>账期 (YYYY-MM)</label>
+          <div class="combo">
+            <input id="ingPeriod" class="txt" placeholder="2026-06" inputmode="numeric" />
+            <button type="button" class="cal" data-target="ingPeriod" data-kind="month">📅</button>
+            <input type="month" class="hiddenpick" id="ingPeriod_pick" tabindex="-1" />
+          </div>
+        </div>
+        <div class="field">
+          <label>订阅（可选）</label>
+          <select id="ingSub"><option value="">全部</option></select>
+        </div>
+        <button id="ingBtn">拉取</button>
+      </div>
+      <div class="meta">提示：日账单账期填当月；月账单账期填上一个完整月（如本月是 6 月，月账单填 2026-05）。</div>
+      <div id="ingMsg" class="msg"></div>
+    </div>
+
+    <div class="card">
+      <h2>1b. 每日自动拉取</h2>
+      <div class="row">
+        <button id="refreshBtn">立即刷新（daily 当月 + monthly 上月）</button>
+        <button class="secondary" id="statusBtn">刷新状态</button>
+        <span class="pill" id="schedPill">调度状态：加载中…</span>
+      </div>
+      <div id="refreshMsg" class="msg"></div>
+    </div>
+
+    <div class="card">
+      <h2>2. 查询账单</h2>
+      <div class="row">
+        <div class="field">
+          <label>云 / 聚合</label>
+          <select id="qCloud"></select>
+        </div>
+        <div class="field">
+          <label>数据集</label>
+          <div class="seg" id="qDataset">
+            <label><input type="radio" name="qDs" value="daily" checked /><span>日账单 daily</span></label>
+            <label><input type="radio" name="qDs" value="monthly" /><span>月账单 monthly</span></label>
+          </div>
+        </div>
+        <div class="field" id="qDateField">
+          <label>日期 (YYYY-MM-DD)</label>
+          <div class="combo">
+            <input id="qDate" class="txt" placeholder="2026-06-15" inputmode="numeric" />
+            <button type="button" class="cal" data-target="qDate" data-kind="date">📅</button>
+            <input type="date" class="hiddenpick" id="qDate_pick" tabindex="-1" />
+          </div>
+        </div>
+        <div class="field" id="qMonthField">
+          <label>月份 (YYYY-MM)</label>
+          <div class="combo">
+            <input id="qMonth" class="txt" placeholder="2026-05" inputmode="numeric" />
+            <button type="button" class="cal" data-target="qMonth" data-kind="month">📅</button>
+            <input type="month" class="hiddenpick" id="qMonth_pick" tabindex="-1" />
+          </div>
+        </div>
+        <div class="field">
+          <label>订阅ID（可选）</label>
+          <input id="qSubId" placeholder="留空=该云全部" />
+        </div>
+        <div class="field">
+          <label>每页</label>
+          <input id="qPageSize" type="number" value="50" min="1" />
+        </div>
+        <button id="qBtn">查询</button>
+      </div>
+      <div class="urlbar">
+        <code id="qUrl"></code>
+        <button type="button" class="secondary" id="copyUrl">复制 URL</button>
+        <button type="button" class="secondary" id="copyCurl">复制 curl</button>
+      </div>
+      <div id="qMsg" class="msg"></div>
+      <div class="pager" id="pager" style="display:none">
+        <button class="secondary" id="prevBtn">上一页</button>
+        <span class="pill" id="pageInfo"></span>
+        <button class="secondary" id="nextBtn">下一页</button>
+        <span class="pill" id="totalInfo"></span>
+      </div>
+      <div id="result"></div>
+    </div>
+
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let state = { page: 1, totalPages: 1, pageSize: 50 };
+
+    const segValue = (groupName) =>
+      document.querySelector(`input[name="${groupName}"]:checked`).value;
+
+    const reMonth = /^\d{4}-\d{2}$/;
+    const reDate = /^\d{4}-\d{2}-\d{2}$/;
+
+    async function loadMeta() {
+      const m = await fetch("/api/v1/admin/meta").then(r => r.json());
+      const cloudSel = $("qCloud");
+      m.clouds.forEach(c => cloudSel.add(new Option(c, c)));
+      const subSel = $("ingSub");
+      m.subscriptions.forEach(s => subSel.add(new Option(`${s.subscriptionKey} (${s.cloud})`, s.subscriptionKey)));
+      $("qPageSize").value = m.defaultPageSize;
+      state.pageSize = m.defaultPageSize;
+      prefillDates();
+      refreshUrl();
+    }
+
+    const pad = (n) => String(n).padStart(2, "0");
+
+    function prefillDates() {
+      const now = new Date();
+      const ym = `${now.getFullYear()}-${pad(now.getMonth() + 1)}`;
+      const lm = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const lastYm = `${lm.getFullYear()}-${pad(lm.getMonth() + 1)}`;
+      if (!$("ingPeriod").value) $("ingPeriod").value = ym;
+      if (!$("qDate").value) $("qDate").value = `${ym}-${pad(now.getDate())}`;
+      if (!$("qMonth").value) $("qMonth").value = lastYm;
+    }
+
+    async function doIngest() {
+      const btn = $("ingBtn"), msg = $("ingMsg");
+      const period = $("ingPeriod").value.trim();
+      if (!reMonth.test(period)) {
+        msg.className = "msg err"; msg.textContent = "账期格式应为 YYYY-MM，例如 2026-06"; return;
+      }
+      btn.disabled = true; msg.className = "msg"; msg.textContent = "拉取中…";
+      try {
+        const body = { dataset: segValue("ingDs"), period };
+        const sub = $("ingSub").value; if (sub) body.subscription = sub;
+        const r = await fetch("/api/v1/admin/ingest", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+        });
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.detail || JSON.stringify(j));
+        msg.className = "msg ok";
+        msg.textContent = "完成，共 " + j.totalRows + " 行\n" +
+          j.results.map(x => `  ${x.subscriptionKey} ${x.dataset} ${x.period}: ${x.status} (${x.rows} 行)`).join("\n");
+      } catch (e) {
+        msg.className = "msg err"; msg.textContent = "失败：" + e.message;
+      } finally { btn.disabled = false; }
+    }
+
+    async function doQuery(page) {
+      const btn = $("qBtn"), msg = $("qMsg");
+      const ds = segValue("qDs");
+      if (ds === "daily" && !reDate.test($("qDate").value.trim())) {
+        msg.className = "msg err"; msg.textContent = "日期格式应为 YYYY-MM-DD，例如 2026-06-15"; return;
+      }
+      if (ds === "monthly" && !reMonth.test($("qMonth").value.trim())) {
+        msg.className = "msg err"; msg.textContent = "月份格式应为 YYYY-MM，例如 2026-05"; return;
+      }
+      state.page = page || 1;
+      state.pageSize = parseInt($("qPageSize").value, 10) || 50;
+      refreshUrl();
+      btn.disabled = true; msg.className = "msg"; msg.textContent = "查询中…";
+      $("result").innerHTML = ""; $("pager").style.display = "none";
+      try {
+        const params = new URLSearchParams();
+        params.set("cloud", $("qCloud").value);
+        params.set("page", state.page);
+        params.set("pageSize", state.pageSize);
+        if (ds === "daily") params.set("date", $("qDate").value.trim());
+        else params.set("month", $("qMonth").value.trim());
+        const subId = $("qSubId").value.trim(); if (subId) params.set("subscriptionId", subId);
+        const r = await fetch(`/api/v1/billing/${ds}?` + params.toString());
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.detail || JSON.stringify(j));
+        renderTable(j); msg.textContent = "";
+      } catch (e) {
+        msg.className = "msg err"; msg.textContent = "失败：" + e.message;
+      } finally { btn.disabled = false; }
+    }
+
+    function renderTable(j) {
+      const p = j.pagination; state.totalPages = p.totalPages;
+      $("pager").style.display = "flex";
+      $("pageInfo").textContent = `第 ${p.page} / ${p.totalPages || 1} 页`;
+      $("totalInfo").textContent = `共 ${p.total} 行`;
+      $("prevBtn").disabled = p.page <= 1;
+      $("nextBtn").disabled = p.page >= p.totalPages;
+      if (!j.data.length) { $("result").innerHTML = "<div class='meta'>无数据</div>"; return; }
+      const cols = Object.keys(j.data[0]);
+      const rowBase = (p.page - 1) * p.pageSize; // global row offset
+
+      // header row 1: column numbers; header row 2: column names
+      const colnums = "<tr class='colnum'><th class='idx'>#</th>" +
+        cols.map((_, i) => `<th>${i + 1}</th>`).join("") + "</tr>";
+      const names = "<tr><th class='idx'>行号</th>" +
+        cols.map(c => `<th>${c}</th>`).join("") + "</tr>";
+
+      const rows = j.data.map((row, i) =>
+        `<tr><td class='idx'>${rowBase + i + 1}</td>` +
+        cols.map(c => `<td>${row[c] === null ? "" : String(row[c])}</td>`).join("") + "</tr>"
+      ).join("");
+
+      $("result").innerHTML =
+        `<table><thead>${colnums}${names}</thead><tbody>${rows}</tbody></table>`;
+    }
+
+    function syncFields() {
+      const ds = segValue("qDs");
+      const dailyOn = ds === "daily";
+      $("qDate").disabled = !dailyOn;
+      $("qMonth").disabled = dailyOn;
+      $("qDateField").className = "field " + (dailyOn ? "active" : "dim");
+      $("qMonthField").className = "field " + (dailyOn ? "dim" : "active");
+      refreshUrl();
+    }
+
+    function buildQueryUrl() {
+      const ds = segValue("qDs");
+      const params = new URLSearchParams();
+      params.set("cloud", $("qCloud").value || "");
+      if (ds === "daily") params.set("date", $("qDate").value.trim());
+      else params.set("month", $("qMonth").value.trim());
+      const subId = $("qSubId").value.trim(); if (subId) params.set("subscriptionId", subId);
+      params.set("page", state.page || 1);
+      params.set("pageSize", $("qPageSize").value || 50);
+      return `${location.origin}/api/v1/billing/${ds}?` + params.toString();
+    }
+
+    function refreshUrl() { $("qUrl").textContent = buildQueryUrl(); }
+
+    async function copy(text, btn) {
+      try { await navigator.clipboard.writeText(text); }
+      catch { const t = document.createElement("textarea"); t.value = text; document.body.appendChild(t); t.select(); document.execCommand("copy"); t.remove(); }
+      const old = btn.textContent; btn.textContent = "已复制 ✓";
+      setTimeout(() => { btn.textContent = old; }, 1200);
+    }
+
+    function wireCalendars() {
+      document.querySelectorAll("button.cal").forEach(btn => {
+        const target = btn.dataset.target;
+        const pick = $(target + "_pick");
+        btn.addEventListener("click", () => {
+          const v = $(target).value.trim();
+          if (v) pick.value = v;
+          if (typeof pick.showPicker === "function") { try { pick.showPicker(); return; } catch (e) {} }
+          pick.focus(); pick.click();
+        });
+        pick.addEventListener("change", () => {
+          if (pick.value) { $(target).value = pick.value; refreshUrl(); }
+        });
+      });
+    }
+
+    async function loadStatus() {
+      try {
+        const s = await fetch("/api/v1/admin/refresh/status").then(r => r.json());
+        const en = s.enabled ? `已启用 @ ${s.scheduleUtc} UTC` : "未启用（用 cron/systemd）";
+        const next = s.nextRun ? ` · 下次 ${s.nextRun}` : "";
+        const last = s.lastRun ? ` · 上次 ${s.lastRun.finishedAt} (${s.lastRun.totalRows} 行)` : "";
+        $("schedPill").textContent = `调度：${en}${next}${last}`;
+      } catch (e) { $("schedPill").textContent = "调度状态获取失败"; }
+    }
+
+    async function doRefresh() {
+      const btn = $("refreshBtn"), msg = $("refreshMsg");
+      btn.disabled = true; msg.className = "msg"; msg.textContent = "刷新中…（读 Raw → 写 Curated）";
+      try {
+        const j = await fetch("/api/v1/admin/refresh", { method: "POST" }).then(r => r.json());
+        if (j.detail) throw new Error(j.detail);
+        msg.className = "msg ok";
+        msg.textContent = `完成：daily=${j.dailyPeriod} monthly=${j.monthlyPeriod}，共 ${j.totalRows} 行\n` +
+          j.results.map(x => `  ${x.subscriptionKey || "-"} ${x.dataset} ${x.period}: ${x.status} (${x.rows || 0} 行)`).join("\n");
+        loadStatus();
+      } catch (e) {
+        msg.className = "msg err"; msg.textContent = "失败：" + e.message;
+      } finally { btn.disabled = false; }
+    }
+
+    $("ingBtn").onclick = doIngest;
+    $("qBtn").onclick = () => doQuery(1);
+    $("prevBtn").onclick = () => doQuery(state.page - 1);
+    $("nextBtn").onclick = () => doQuery(state.page + 1);
+    $("qDataset").addEventListener("change", syncFields);
+    ["qCloud", "qDate", "qMonth", "qSubId", "qPageSize"].forEach(id =>
+      $(id).addEventListener("input", refreshUrl));
+    $("qCloud").addEventListener("change", refreshUrl);
+    $("copyUrl").onclick = (e) => copy(buildQueryUrl(), e.target);
+    $("copyCurl").onclick = (e) => copy(`curl "${buildQueryUrl()}"`, e.target);
+    $("refreshBtn").onclick = doRefresh;
+    $("statusBtn").onclick = loadStatus;
+    wireCalendars();
+    loadMeta(); syncFields(); loadStatus();
+  </script>
+</body>
+</html>
