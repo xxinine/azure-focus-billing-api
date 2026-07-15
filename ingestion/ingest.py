@@ -44,7 +44,12 @@ def ingest_partition(
             "DESCRIBE SELECT * FROM read_parquet(?, union_by_name=true)",
             [raw_glob],
         ).fetchall()
-    except duckdb.IOException:
+    except duckdb.IOException as exc:
+        # Only a genuine "no files match the glob" is a legitimate skip.
+        # Auth/permission/network errors (e.g. AuthorizationPermissionMismatch)
+        # must surface instead of being silently reported as missing data.
+        if "no files found" not in str(exc).lower():
+            raise
         print(f"  [skip] no raw files: {raw_glob}")
         return {
             "subscriptionKey": sub.subscription_key,

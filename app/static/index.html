@@ -133,8 +133,8 @@
           </div>
         </div>
         <div class="field">
-          <label>订阅ID（可选）</label>
-          <input id="qSubId" placeholder="留空=该云全部" />
+          <label>订阅（可选）</label>
+          <select id="qSubId"><option value="">全部</option></select>
         </div>
         <div class="field">
           <label>每页</label>
@@ -162,6 +162,7 @@
   <script>
     const $ = (id) => document.getElementById(id);
     let state = { page: 1, totalPages: 1, pageSize: 50 };
+    let allSubs = [];
 
     const segValue = (groupName) =>
       document.querySelector(`input[name="${groupName}"]:checked`).value;
@@ -175,10 +176,25 @@
       m.clouds.forEach(c => cloudSel.add(new Option(c, c)));
       const subSel = $("ingSub");
       m.subscriptions.forEach(s => subSel.add(new Option(`${s.subscriptionKey} (${s.cloud})`, s.subscriptionKey)));
+      allSubs = m.subscriptions || [];
+      populateQuerySubs();
       $("qPageSize").value = m.defaultPageSize;
       state.pageSize = m.defaultPageSize;
       prefillDates();
       refreshUrl();
+    }
+
+    function populateQuerySubs() {
+      const sel = $("qSubId");
+      const prev = sel.value;
+      const cloud = $("qCloud").value;
+      sel.innerHTML = "";
+      sel.add(new Option("全部", ""));
+      allSubs
+        .filter(s => !cloud || s.cloud === cloud)
+        .forEach(s => sel.add(new Option(`${s.subscriptionKey} (${s.subscriptionId})`, s.subscriptionId)));
+      // keep prior selection if still valid, else reset to 全部
+      sel.value = [...sel.options].some(o => o.value === prev) ? prev : "";
     }
 
     const pad = (n) => String(n).padStart(2, "0");
@@ -352,7 +368,7 @@
     $("qDataset").addEventListener("change", syncFields);
     ["qCloud", "qDate", "qMonth", "qSubId", "qPageSize"].forEach(id =>
       $(id).addEventListener("input", refreshUrl));
-    $("qCloud").addEventListener("change", refreshUrl);
+    $("qCloud").addEventListener("change", () => { populateQuerySubs(); refreshUrl(); });
     $("copyUrl").onclick = (e) => copy(buildQueryUrl(), e.target);
     $("copyCurl").onclick = (e) => copy(`curl "${buildQueryUrl()}"`, e.target);
     $("refreshBtn").onclick = doRefresh;

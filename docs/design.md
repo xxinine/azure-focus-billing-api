@@ -8,20 +8,22 @@
   - 月账单查询
   - 按日期或月份过滤
   - 大数据量分页查询
-- 组织方式：china 和 global 各包含多订阅，导出与处理完全按订阅独立执行。
-- 查询视图：仅在 API 查询层通过 cloud=china|global 做统一聚合。
+- 部署拓扑：**单部署单云**——一套代码、一次部署只对接 China 或 Global 之一，只需一套存储 + Service Principal 配置。若两个云都要，则各自独立部署两套。
+- 组织方式：同一云下可含多个订阅，导出与处理完全按订阅独立执行。
+- 查询视图：在 API 查询层通过 cloud=china|global 对本部署云下的订阅做统一聚合。
 
 ## 2. 关键约束（本次确认）
 
 - Parquet 数据层不落本地，开发期和部署期都放在 Azure Blob。
 - Blob 账户地址通过环境变量读取。
 - 导出与处理按订阅独立配置：有几个订阅就有几套配置参数。
-- Blob 鉴权方式：托管身份（Managed Identity）。
+- Blob 鉴权方式：Service Principal（默认，支持密钥/证书）、Managed Identity、SAS、Connection String 四选一。
+- 主权云自适应：代码按 `BLOB_ACCOUNT_URL` 后缀自动识别云（`*.chinacloudapi.cn` → Azure China，否则 Global），自动切换 AAD 授权终结点（China 为 `login.chinacloudapi.cn`）与存储终结点（`blob.core.chinacloudapi.cn`），无需额外开关。
 - 已核实的真实导出布局（单个 global 订阅，币种 USD）：
   - `focus-cost/autotsp-focus-cost-daily-parquet/<YYYYMMDD-YYYYMMDD>/<RunID>/manifest.json + part_*.parquet`
   - `focus-cost/autotsp-focus-cost-monthly-parquet/<YYYYMMDD-YYYYMMDD>/<RunID>/...`
   - 该 export 路径对应单个订阅，没有按订阅再分子目录；开启 Overwrite，每月文件夹仅一个 RunID。
-- China 订阅属于 Azure China（世纪互联）独立云：使用独立 storage account / ARM 端点，配置为单独的订阅条目（或单独部署），不与 global 混在同一路径。
+- China 属于 Azure China（世纪互联）独立云：使用独立 storage account / ARM 端点，作为单独部署（自己的存储 + SP），不与 global 混在同一部署或同一路径。
 
 ## 3. 存储与路径设计
 
@@ -57,7 +59,7 @@
 
 ## 4. 架构与数据流
 
-1. Export（已存在）按订阅输出 daily/monthly FOCUS Parquet 到各自 Raw 路径。
+1. Export（已在 Azure Portal 按订阅配置完成）按订阅输出 daily/monthly FOCUS Parquet（不压缩）到各自 Raw 路径；仓库内 `ingestion/export_setup.py` 仅用于日后以脚本方式创建/更新导出，非必需步骤。
 2. Ingestion 作业按订阅读取 Raw 分区文件，按统一 schema 做清洗与字段补齐。
 3. 写回 Curated Blob 分区路径（按 dataset + subscription + period 覆盖写，保持幂等）。
 4. API 服务使用 DuckDB 查询 Blob 上 Curated Parquet；查询层按 cloud 参数汇总对应订阅集合并返回分页结果。
@@ -124,15 +126,16 @@
   - `total`
   - `totalPages`
 
-## 7. 环境变量设计（建议，支持多订阅）
+## 7. 环境变量设计（单云部署，支持本云多订阅）
 
-- `BLOB_ACCOUNT_URL=https://<your-storage-account>.blob.core.windows.net`
+- `BLOB_ACCOUNT_URL`：Global 为 `https://<acct>.blob.core.windows.net`；China 为 `https://<acct>.blob.core.chinacloudapi.cn`（代码据此自动识别主权云）。
 - `BLOB_CONTAINER=report`
 - `CURATED_PREFIX=curated/focus`
-- `AZURE_STORAGE_AUTH_MODE=managed_identity|sas|connection_string`
-- `FOCUS_SUBSCRIPTIONS_CONFIG_JSON`：订阅配置清单（JSON 字符串）
+- `AZURE_STORAGE_AUTH_MODE=service_principal|managed_identity|sas|connection_string`
+- Service Principal 凭据：`AZURE_TENANT_ID` / `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET`（或 `AZURE_CLIENT_CERTIFICATE_PATH`）
+- `FOCUS_SUBSCRIPTIONS_CONFIG_FILE` 或 `FOCUS_SUBSCRIPTIONS_CONFIG_JSON`：本云订阅配置清单（文件优先，内联 JSON 非空则覆盖）
 
-示例：
+示例（单云部署，只列本云订阅；此例为 Global）：
 
 ```json
 [
@@ -142,16 +145,11 @@
     "cloud": "global",
     "dailyPrefix": "focus-cost/global-prod-01/autotsp-focus-cost-daily-parquet",
     "monthlyPrefix": "focus-cost/global-prod-01/autotsp-focus-cost-monthly-parquet"
-  },
-  {
-    "subscriptionKey": "china-fin-02",
-    "subscriptionId": "<guid>",
-    "cloud": "china",
-    "dailyPrefix": "focus-cost/china-fin-02/autotsp-focus-cost-daily-parquet",
-    "monthlyPrefix": "focus-cost/china-fin-02/autotsp-focus-cost-monthly-parquet"
   }
 ]
 ```
+
+> China 部署为另一套：`BLOB_ACCOUNT_URL` 填中国云存储 URL，订阅 `cloud` 为 `china`，其余配置同构；代码自动切换中国云授权/存储终结点。
 
 可选（按认证方式）：
 
@@ -161,6 +159,7 @@
 ## 8. DuckDB 访问 Blob 方案
 
 - 使用 DuckDB 读取 Blob 上 Parquet（通过 Azure Storage 凭据配置）。
+- 主权云适配：DuckDB azure secret 根据存储账号 URL 后缀注入 `ENDPOINT`，并为 China 设置 `AZURE_AUTHORITY_HOST`，以免 token 打到错误的授权终结点（否则中国租户 SP 会报 GetToken 400）。
 - 查询侧仅拉取所需列和分区，减少网络与计算开销。
 - 建议在 SQL 中显式分区过滤：`dataset/cloud/subscription/period`，避免全量扫描。
 

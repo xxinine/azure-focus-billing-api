@@ -11,6 +11,14 @@ from azure.storage.blob import BlobServiceClient
 from .config import Settings
 
 
+def _authority(account_url: str) -> str | None:
+    """AAD authority for the sovereign cloud the account lives in.
+    None means the azure-identity default (Azure public cloud)."""
+    if ".chinacloudapi.cn" in account_url:
+        return "https://login.chinacloudapi.cn"
+    return None
+
+
 def _credential(settings: Settings):
     from azure.identity import (
         CertificateCredential,
@@ -18,20 +26,23 @@ def _credential(settings: Settings):
         DefaultAzureCredential,
     )
 
+    authority = _authority(settings.blob_account_url)
     if settings.azure_storage_auth_mode == "service_principal":
         if settings.azure_client_secret:
             return ClientSecretCredential(
                 settings.azure_tenant_id,
                 settings.azure_client_id,
                 settings.azure_client_secret,
+                authority=authority,
             )
         return CertificateCredential(
             settings.azure_tenant_id,
             settings.azure_client_id,
             certificate_path=settings.azure_client_certificate_path,
+            authority=authority,
         )
     # managed_identity / az cli dev
-    return DefaultAzureCredential()
+    return DefaultAzureCredential(authority=authority) if authority else DefaultAzureCredential()
 
 
 def blob_service(settings: Settings, account_url: str) -> BlobServiceClient:

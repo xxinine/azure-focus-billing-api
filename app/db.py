@@ -20,6 +20,25 @@ def _account_name(account_url: str) -> str:
     return account_url.split("//", 1)[-1].split(".", 1)[0]
 
 
+def _endpoint_suffix(account_url: str) -> str:
+    """Storage endpoint suffix, e.g. blob.core.windows.net (public) or
+    blob.core.chinacloudapi.cn (Azure China / 21Vianet)."""
+    host = account_url.split("//", 1)[-1]
+    return host.split(".", 1)[1] if "." in host else host
+
+
+def _authority_host(account_url: str) -> str | None:
+    """AAD authority for the sovereign cloud the storage account lives in.
+
+    DuckDB's azure extension (and azure-identity) resolve OAuth tokens against
+    the global authority (login.microsoftonline.com) by default, which returns
+    HTTP 400 for a China-tenant service principal. Return the China authority
+    for *.chinacloudapi.cn accounts; None means use the SDK default (public)."""
+    if ".chinacloudapi.cn" in account_url:
+        return "https://login.chinacloudapi.cn"
+    return None
+
+
 def _q(value: str) -> str:
     """Escape a string as a DuckDB SQL single-quoted literal.
 
@@ -39,6 +58,7 @@ def _create_secret(
     """Create one DuckDB azure secret scoped to a specific container/account."""
     account = _account_name(account_url)
     scope = f"az://{container}"
+    endpoint = _endpoint_suffix(account_url)
     mode = settings.azure_storage_auth_mode
 
     if mode == "service_principal":
@@ -58,7 +78,8 @@ def _create_secret(
             )
         con.execute(
             f"CREATE OR REPLACE SECRET {name} (TYPE azure, PROVIDER service_principal, "
-            f"{common}{cred}ACCOUNT_NAME {_q(account)}, SCOPE {_q(scope)});"
+            f"{common}{cred}ACCOUNT_NAME {_q(account)}, ENDPOINT {_q(endpoint)}, "
+            f"SCOPE {_q(scope)});"
         )
     elif mode == "connection_string":
         if not settings.azure_storage_connection_string:
@@ -79,12 +100,19 @@ def _create_secret(
     else:  # managed_identity / az cli dev -> credential chain
         con.execute(
             f"CREATE OR REPLACE SECRET {name} (TYPE azure, PROVIDER credential_chain, "
-            f"ACCOUNT_NAME {_q(account)}, SCOPE {_q(scope)});"
+            f"ACCOUNT_NAME {_q(account)}, ENDPOINT {_q(endpoint)}, SCOPE {_q(scope)});"
         )
 
 
 def _configure_azure(con: duckdb.DuckDBPyConnection, settings: Settings) -> None:
+    import os
+
     con.execute("INSTALL azure; LOAD azure;")
+    # DuckDB's azure extension resolves OAuth tokens via the Azure C++ SDK, which
+    # reads AZURE_AUTHORITY_HOST. Without this, a China-tenant SP gets HTTP 400.
+    authority = _authority_host(settings.blob_account_url)
+    if authority:
+        os.environ["AZURE_AUTHORITY_HOST"] = authority
     # Distinct (account, container) targets: raw export + curated.
     targets = {
         ("raw", settings.blob_account_url, settings.blob_container),

@@ -1,7 +1,7 @@
 """Create/Update per-subscription Azure Cost Management FOCUS exports.
 
 One export config per subscription (daily month-to-date + monthly last month),
-format Parquet + Snappy, written to the configured Blob container.
+format Parquet (uncompressed), written to the configured Blob container.
 
 Notes:
 - FOCUS dataset version is set to the requested value; if a region/cloud does
@@ -58,7 +58,7 @@ def _export_payload(
             "schedule": _schedule(frequency),
             "format": "Parquet",
             "partitionData": True,
-            "compressionMode": "Snappy",
+            "compressionMode": "None",
             "dataOverwriteBehavior": "OverwritePreviousReport",
             "deliveryInfo": {
                 "destination": {

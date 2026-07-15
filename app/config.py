@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     max_page_size: int = 1000
 
     # In-process daily scheduler (APScheduler). Times are UTC.
-    scheduler_enabled: bool = False
+    scheduler_enabled: bool = True
     scheduler_hour: int = 2
     scheduler_minute: int = 30
 
