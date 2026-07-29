@@ -10,7 +10,8 @@
     body { font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
            margin: 0; color: #1f2328; background: #fff; }
     header { background: #24292f; color: #fff; padding: 12px 20px; font-size: 16px; font-weight: 600; }
-    .wrap { padding: 20px; max-width: 1200px; margin: 0 auto; }
+    .wrap { padding: 20px; width: 100%; max-width: min(1600px, 100%); margin: 0 auto; }
+    @media (max-width: 640px) { .wrap { padding: 12px; } }
     .card { border: 1px solid var(--bd); border-radius: 8px; padding: 16px; margin-bottom: 20px; background: #fff; }
     .card h2 { margin: 0 0 12px; font-size: 15px; }
     .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
@@ -51,12 +52,21 @@
     .msg.ok { color: var(--ok); }
     .msg.err { color: var(--err); }
     .meta { font-size: 12px; color: #57606a; margin-top: 6px; }
-    table { border-collapse: collapse; width: 100%; font-size: 12px; margin-top: 10px; display: block; overflow-x: auto; }
-    th, td { border: 1px solid var(--bd); padding: 4px 8px; text-align: left; white-space: nowrap; }
-    th { background: var(--bg); position: sticky; top: 0; }
-    th.idx, td.idx { background: #eef1f4; color: #57606a; text-align: right; font-variant-numeric: tabular-nums; }
-    tr.colnum th { background: #e7ebef; color: #57606a; text-align: center; font-weight: 600; }
-    .pager { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+
+    /* scroll container: freezes header rows (top) + row-number column (left) */
+    .tablewrap { max-height: 72vh; overflow: auto; border: 1px solid var(--bd); border-radius: 8px; margin-top: 10px; }
+    table { border-collapse: separate; border-spacing: 0; width: max-content; min-width: 100%; font-size: 12px; }
+    th, td { border-right: 1px solid var(--bd); border-bottom: 1px solid var(--bd);
+             padding: 4px 8px; text-align: left; white-space: nowrap; background: #fff; }
+    /* frozen header rows */
+    thead th { position: sticky; z-index: 2; }
+    thead tr.colnum th { top: 0; background: #e7ebef; color: #57606a; text-align: center; font-weight: 600; }
+    thead tr.names th { background: var(--bg); }
+    /* frozen first (row-number) column */
+    th.idx, td.idx { position: sticky; left: 0; z-index: 1;
+                     background: #eef1f4; color: #57606a; text-align: right; font-variant-numeric: tabular-nums; }
+    thead th.idx { z-index: 4; }
+    .pager { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
     .pill { background: var(--bg); border: 1px solid var(--bd); border-radius: 12px; padding: 2px 10px; font-size: 12px; }
   </style>
 </head>
@@ -141,6 +151,7 @@
           <input id="qPageSize" type="number" value="50" min="1" />
         </div>
         <button id="qBtn">查询</button>
+        <button type="button" class="secondary" id="exportBtn">导出 CSV</button>
       </div>
       <div class="urlbar">
         <code id="qUrl"></code>
@@ -263,6 +274,60 @@
       } finally { btn.disabled = false; }
     }
 
+    function csvCell(v) {
+      const s = v === null || v === undefined ? "" : String(v);
+      return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    }
+
+    async function doExport() {
+      const btn = $("exportBtn"), msg = $("qMsg");
+      const ds = segValue("qDs");
+      if (ds === "daily" && !reDate.test($("qDate").value.trim())) {
+        msg.className = "msg err"; msg.textContent = "日期格式应为 YYYY-MM-DD，例如 2026-06-15"; return;
+      }
+      if (ds === "monthly" && !reMonth.test($("qMonth").value.trim())) {
+        msg.className = "msg err"; msg.textContent = "月份格式应为 YYYY-MM，例如 2026-05"; return;
+      }
+      btn.disabled = true; msg.className = "msg"; msg.textContent = "导出中…（拉取全部分页）";
+      try {
+        const params = new URLSearchParams();
+        params.set("cloud", $("qCloud").value);
+        params.set("pageSize", 1000);
+        if (ds === "daily") params.set("date", $("qDate").value.trim());
+        else params.set("month", $("qMonth").value.trim());
+        const subId = $("qSubId").value.trim(); if (subId) params.set("subscriptionId", subId);
+
+        const all = [];
+        let page = 1, totalPages = 1;
+        do {
+          params.set("page", page);
+          const r = await fetch(`/api/v1/billing/${ds}?` + params.toString());
+          const j = await r.json();
+          if (!r.ok) throw new Error(j.detail || JSON.stringify(j));
+          all.push(...j.data);
+          totalPages = j.pagination.totalPages || 1;
+          page += 1;
+        } while (page <= totalPages);
+
+        if (!all.length) { msg.className = "msg err"; msg.textContent = "无数据可导出"; return; }
+
+        const cols = Object.keys(all[0]);
+        const lines = [cols.map(csvCell).join(",")];
+        for (const row of all) lines.push(cols.map(c => csvCell(row[c])).join(","));
+        const blob = new Blob(["\ufeff" + lines.join("\r\n")], { type: "text/csv;charset=utf-8;" });
+
+        const key = ds === "daily" ? $("qDate").value.trim() : $("qMonth").value.trim();
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `billing_${ds}_${$("qCloud").value}_${key}.csv`;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+        msg.className = "msg ok"; msg.textContent = `已导出 ${all.length} 行 CSV`;
+      } catch (e) {
+        msg.className = "msg err"; msg.textContent = "导出失败：" + e.message;
+      } finally { btn.disabled = false; }
+    }
+
     function renderTable(j) {
       const p = j.pagination; state.totalPages = p.totalPages;
       $("pager").style.display = "flex";
@@ -277,7 +342,7 @@
       // header row 1: column numbers; header row 2: column names
       const colnums = "<tr class='colnum'><th class='idx'>#</th>" +
         cols.map((_, i) => `<th>${i + 1}</th>`).join("") + "</tr>";
-      const names = "<tr><th class='idx'>行号</th>" +
+      const names = "<tr class='names'><th class='idx'>行号</th>" +
         cols.map(c => `<th>${c}</th>`).join("") + "</tr>";
 
       const rows = j.data.map((row, i) =>
@@ -286,7 +351,12 @@
       ).join("");
 
       $("result").innerHTML =
-        `<table><thead>${colnums}${names}</thead><tbody>${rows}</tbody></table>`;
+        `<div class="tablewrap"><table><thead>${colnums}${names}</thead><tbody>${rows}</tbody></table></div>`;
+
+      // stack the two frozen header rows: 2nd row sticks below the 1st
+      const wrap = $("result").querySelector(".tablewrap");
+      const h1 = wrap.querySelector("tr.colnum").offsetHeight;
+      wrap.querySelectorAll("tr.names th").forEach(th => { th.style.top = h1 + "px"; });
     }
 
     function syncFields() {
@@ -363,6 +433,7 @@
 
     $("ingBtn").onclick = doIngest;
     $("qBtn").onclick = () => doQuery(1);
+    $("exportBtn").onclick = doExport;
     $("prevBtn").onclick = () => doQuery(state.page - 1);
     $("nextBtn").onclick = () => doQuery(state.page + 1);
     $("qDataset").addEventListener("change", syncFields);
