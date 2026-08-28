@@ -13,6 +13,18 @@ class Pagination(BaseModel):
     totalPages: int
 
 
+class CurrencyCost(BaseModel):
+    billingCurrency: str
+    totalBilledCost: float
+
+
+class BillingSummary(BaseModel):
+    costsByCurrency: list[CurrencyCost]
+    includesDerivedTax: bool
+
+
 class BillingResponse(BaseModel):
     data: list[dict[str, Any]]
     pagination: Pagination
+    summary: BillingSummary
+    elapsedMs: float

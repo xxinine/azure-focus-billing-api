@@ -6,10 +6,11 @@ Export and ingestion are configured per subscription.
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 CloudName = Literal["china", "global"]
@@ -39,6 +40,7 @@ class Settings(BaseSettings):
     curated_account_url: str | None = None
     curated_container: str | None = None
     curated_prefix: str = "curated/focus"
+    tax_basis_prefix: str = "curated/tax-basis"
 
     azure_storage_auth_mode: Literal[
         "service_principal", "managed_identity", "sas", "connection_string"
@@ -61,8 +63,12 @@ class Settings(BaseSettings):
     focus_subscriptions_config_file: str | None = None
     focus_subscriptions_config_json: str = "[]"
 
-    default_page_size: int = 100
+    default_page_size: int = 1000
     max_page_size: int = 1000
+
+    # Query-time derived tax rows. The rate is a decimal fraction (0.06 = 6%).
+    tax_enabled: bool = False
+    tax_rate: Decimal = Field(default=Decimal("0"), ge=0, le=1)
 
     # In-process daily scheduler (APScheduler). Times are UTC.
     scheduler_enabled: bool = True
@@ -74,6 +80,18 @@ class Settings(BaseSettings):
     def _validate_json(cls, v: str) -> str:
         json.loads(v)  # fail fast on malformed config
         return v
+
+    @model_validator(mode="after")
+    def _validate_storage_prefixes(self) -> Settings:
+        curated_prefix = self.curated_prefix.strip().strip("/")
+        tax_basis_prefix = self.tax_basis_prefix.strip().strip("/")
+        if not curated_prefix:
+            raise ValueError("CURATED_PREFIX must not be empty")
+        if not tax_basis_prefix:
+            raise ValueError("TAX_BASIS_PREFIX must not be empty")
+        if curated_prefix == tax_basis_prefix:
+            raise ValueError("TAX_BASIS_PREFIX must differ from CURATED_PREFIX")
+        return self
 
     @property
     def curated_account_url_effective(self) -> str:

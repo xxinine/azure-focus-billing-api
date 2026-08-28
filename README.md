@@ -55,6 +55,7 @@ BLOB_CONTAINER=report
 CURATED_ACCOUNT_URL=
 CURATED_CONTAINER=
 CURATED_PREFIX=curated/focus
+TAX_BASIS_PREFIX=curated/tax-basis
 
 # ---- 鉴权 ----
 AZURE_STORAGE_AUTH_MODE=service_principal   # service_principal | managed_identity | sas | connection_string
@@ -70,6 +71,10 @@ AZURE_CLIENT_SECRET=...                     # 或改用 AZURE_CLIENT_CERTIFICATE
 FOCUS_SUBSCRIPTIONS_CONFIG_FILE=config/subscriptions.json
 FOCUS_SUBSCRIPTIONS_CONFIG_JSON=[]
 
+# ---- 查询时增补税费 ----
+TAX_ENABLED=false
+TAX_RATE=0.06              # 小数形式，0.06 表示 6%
+
 # ---- 每日调度（默认进程内调度，见「每日自动拉取」）----
 SCHEDULER_ENABLED=true
 ```
@@ -82,9 +87,12 @@ SCHEDULER_ENABLED=true
 | `BLOB_CONTAINER` | 原始导出所在容器 |
 | `CURATED_ACCOUNT_URL` / `CURATED_CONTAINER` | 规整层存储；留空则复用原始账户/容器 |
 | `CURATED_PREFIX` | 规整层路径前缀 |
+| `TAX_BASIS_PREFIX` | 按订阅、账期、服务预计算的税基汇总路径前缀 |
 | `AZURE_STORAGE_AUTH_MODE` | 鉴权方式，四选一 |
 | `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` | `service_principal` 必填（或用 `AZURE_CLIENT_CERTIFICATE_PATH` 证书） |
 | `FOCUS_SUBSCRIPTIONS_CONFIG_FILE` | 本云订阅清单文件路径 |
+| `TAX_ENABLED` | 是否在查询结果中按 `ServiceName` 增补税费，默认 `false` |
+| `TAX_RATE` | 税率小数，范围 `0` 到 `1`，例如 `0.06` 表示 6% |
 
 **权限（最小化）**：给该身份在存储账户上授 **Storage Blob Data Contributor**（读原始 + 写 curated）。若 curated 在另一账户，则两个账户都授。Azure 上运行可改用 Managed Identity（`managed_identity`，无需密钥）。
 
@@ -149,7 +157,36 @@ curl "http://127.0.0.1:8000/api/v1/billing/monthly?cloud=global&month=2026-06&pa
 
 - 不传 `subscriptionId`：聚合该 cloud 下全部订阅。
 - 传 `subscriptionId`：只查该订阅。
-- 分页：`pageSize` 默认 100、上限 1000；返回 `{ data, pagination: { page, pageSize, total, totalPages } }`。
+- 分页：`pageSize` 默认 1000、上限 1000；返回 `{ data, pagination: { page, pageSize, total, totalPages } }`。
+- 汇总：响应中的 `summary.costsByCurrency` 对完整查询结果的 `BilledCost` 按币种求和，不受当前页影响；`summary.includesDerivedTax` 表示汇总是否包含系统派生税费。
+
+```json
+{
+  "summary": {
+    "costsByCurrency": [
+      {"billingCurrency": "USD", "totalBilledCost": 12345.67}
+    ],
+    "includesDerivedTax": true
+  }
+}
+```
+
+### 税基预计算、查询时税费与数据质量
+
+- 每次成功覆盖 Curated 明细分区后，摄取流程会同步覆盖 `TAX_BASIS_PREFIX` 下的独立税基分区。月账单按订阅、账期和 `ServiceName` 汇总；日账单额外按日期汇总。Curated 明细本身不写入派生税费。
+- `TAX_ENABLED=true` 时，API 从少量税基汇总行按当前 `TAX_RATE` 生成每种 `ServiceName` 一条 `ChargeCategory=Tax` 的派生记录。全部原始明细排在前面，派生税费集中在结果末尾，并共同参与 `total` 和分页。
+- `includeTax=false` 可针对单次查询关闭派生税费；不传该参数默认含税，但仍受部署级 `TAX_ENABLED` 控制。
+- 升级前已经存在的 Curated 分区若尚无税基文件，查询会兼容回退到即时聚合。重新摄取对应账期后即使用预计算快速路径。
+
+无需重新读取 Raw，也可以直接从已有 Curated 明细回填税基：
+
+```bash
+python -m ingestion.tax_basis --dataset monthly --period 2026-07 --subscription <subscriptionKey>
+python -m ingestion.tax_basis --dataset daily --period 2026-08 --subscription <subscriptionKey>
+```
+- 税基只排除已有的 `Tax`；`Credit` 和 `Adjustment` 仍参与计算。`BilledCost`、`EffectiveCost`、`ListCost`、`ContractedCost` 分别按自身汇总值乘以 `TAX_RATE`，结果保留 6 位小数。
+- API 查询阶段校验 19 个核心字段。字符串不得为 `null`、空字符串或全空格，金额必须是有限数值，账期和费用结束时间必须晚于开始时间；资源相关费用必须提供 `ResourceId`，`Tax`、`Credit`、`Adjustment` 允许为空。
+- `ServiceCategory` 和 `ServiceSubcategory` 均要求非空，但保留 Azure 返回的原始值，不校验 FOCUS 枚举或父子关系。同一 `ServiceName` 生成税费时，其账户、币种、服务分类和开票主体必须一致，否则返回 `BILLING_DATA_QUALITY_ERROR`，避免生成归属不明确的税费。
 
 ## 每日自动拉取
 

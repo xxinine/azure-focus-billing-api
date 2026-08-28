@@ -14,7 +14,7 @@ import argparse
 import duckdb
 
 from app.config import SubscriptionConfig, get_settings
-from app.db import get_connection, write_partition
+from app.db import get_connection, write_partition, write_tax_basis_partition
 from app.schema import build_normalization_select
 
 
@@ -77,6 +77,15 @@ def ingest_partition(
         period=period,
         select_sql=select_sql,
     )
+    tax_basis_location, tax_basis_rows = write_tax_basis_partition(
+        con,
+        settings,
+        dataset=dataset,
+        cloud=sub.cloud,
+        subscription_key=sub.subscription_key,
+        period=period,
+        source_sql=select_sql,
+    )
     print(f"  [ok] {sub.subscription_key} {dataset} {period}: {count} rows -> {location}")
     return {
         "subscriptionKey": sub.subscription_key,
@@ -86,6 +95,8 @@ def ingest_partition(
         "rows": int(count),
         "status": "ok",
         "location": location,
+        "taxBasisLocation": tax_basis_location,
+        "taxBasisRows": tax_basis_rows,
     }
 
 

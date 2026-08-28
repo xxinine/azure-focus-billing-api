@@ -4,17 +4,21 @@
 """
 from __future__ import annotations
 
+import json
+import logging
 import math
 import re
+from time import perf_counter
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query
 
 from ..config import get_settings
-from ..db import query_billing
-from ..models import BillingResponse, Pagination
+from ..db import BillingDataQualityError, query_billing
+from ..models import BillingResponse, BillingSummary, Pagination
 
 router = APIRouter(prefix="/api/v1/billing", tags=["billing"])
+logger = logging.getLogger("uvicorn.error")
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
@@ -38,7 +42,9 @@ def get_daily(
     subscriptionId: str | None = None,
     page: int = 1,
     pageSize: int | None = None,
+    includeTax: bool = True,
 ) -> BillingResponse:
+    started = perf_counter()
     if not _DATE_RE.match(date):
         raise HTTPException(400, "date must be YYYY-MM-DD")
     settings = get_settings()
@@ -50,16 +56,45 @@ def get_daily(
 
     period = date[:7]
     where = "CAST(\"ChargePeriodStart\" AS DATE) = CAST(? AS DATE)"
-    rows, total = query_billing(
+    try:
+        rows, total, summary = _query_or_data_quality_error(
+            dataset="daily",
+            subs=subs,
+            period=period,
+            where_sql=where,
+            where_params=[date],
+            page=page,
+            page_size=page_size,
+            include_tax=includeTax,
+        )
+    except Exception:
+        elapsed_ms = _elapsed_ms(started)
+        _log_query(
+            status="error",
+            dataset="daily",
+            cloud=cloud,
+            period=date,
+            page=page,
+            page_size=page_size,
+            include_tax=includeTax,
+            elapsed_ms=elapsed_ms,
+        )
+        raise
+    elapsed_ms = _elapsed_ms(started)
+    _log_query(
+        status="ok",
         dataset="daily",
-        subs=subs,
-        period=period,
-        where_sql=where,
-        where_params=[date],
+        cloud=cloud,
+        period=date,
         page=page,
         page_size=page_size,
+        include_tax=includeTax,
+        rows=len(rows),
+        total=total,
+        summary=summary,
+        elapsed_ms=elapsed_ms,
     )
-    return _build_response(rows, total, page, page_size)
+    return _build_response(rows, total, summary, page, page_size, elapsed_ms)
 
 
 @router.get("/monthly", response_model=BillingResponse)
@@ -69,7 +104,9 @@ def get_monthly(
     subscriptionId: str | None = None,
     page: int = 1,
     pageSize: int | None = None,
+    includeTax: bool = True,
 ) -> BillingResponse:
+    started = perf_counter()
     if not _MONTH_RE.match(month):
         raise HTTPException(400, "month must be YYYY-MM")
     settings = get_settings()
@@ -80,19 +117,73 @@ def get_monthly(
         raise HTTPException(404, f"no subscriptions configured for cloud={cloud}")
 
     where = "strftime(\"BillingPeriodStart\", '%Y-%m') = ?"
-    rows, total = query_billing(
+    try:
+        rows, total, summary = _query_or_data_quality_error(
+            dataset="monthly",
+            subs=subs,
+            period=month,
+            where_sql=where,
+            where_params=[month],
+            page=page,
+            page_size=page_size,
+            include_tax=includeTax,
+        )
+    except Exception:
+        elapsed_ms = _elapsed_ms(started)
+        _log_query(
+            status="error",
+            dataset="monthly",
+            cloud=cloud,
+            period=month,
+            page=page,
+            page_size=page_size,
+            include_tax=includeTax,
+            elapsed_ms=elapsed_ms,
+        )
+        raise
+    elapsed_ms = _elapsed_ms(started)
+    _log_query(
+        status="ok",
         dataset="monthly",
-        subs=subs,
+        cloud=cloud,
         period=month,
-        where_sql=where,
-        where_params=[month],
         page=page,
         page_size=page_size,
+        include_tax=includeTax,
+        rows=len(rows),
+        total=total,
+        summary=summary,
+        elapsed_ms=elapsed_ms,
     )
-    return _build_response(rows, total, page, page_size)
+    return _build_response(rows, total, summary, page, page_size, elapsed_ms)
 
 
-def _build_response(rows, total, page, page_size) -> BillingResponse:
+def _query_or_data_quality_error(**kwargs):
+    try:
+        return query_billing(**kwargs)
+    except BillingDataQualityError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "BILLING_DATA_QUALITY_ERROR",
+                "message": str(exc),
+                "violations": exc.violations,
+            },
+        ) from exc
+
+
+def _elapsed_ms(started: float) -> float:
+    return round((perf_counter() - started) * 1000, 2)
+
+
+def _log_query(**fields: object) -> None:
+    logger.info(
+        "billing_query\n%s",
+        json.dumps(fields, ensure_ascii=False, indent=2, default=str),
+    )
+
+
+def _build_response(rows, total, summary, page, page_size, elapsed_ms) -> BillingResponse:
     return BillingResponse(
         data=rows,
         pagination=Pagination(
@@ -101,4 +192,6 @@ def _build_response(rows, total, page, page_size) -> BillingResponse:
             total=total,
             totalPages=math.ceil(total / page_size) if page_size else 0,
         ),
+        summary=BillingSummary.model_validate(summary),
+        elapsedMs=elapsed_ms,
     )

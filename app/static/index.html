@@ -47,6 +47,8 @@
     .field.dim label { color: #c2c8ce; }
     .field.active label { color: var(--pri); font-weight: 700; }
     .field.active input { border-color: var(--pri); box-shadow: 0 0 0 3px rgba(9,105,218,.18); }
+    .checkline { min-height: 34px; display: inline-flex; align-items: center; gap: 7px; color: #1f2328; cursor: pointer; }
+    .checkline input { width: 16px; height: 16px; margin: 0; accent-color: var(--pri); }
 
     .msg { margin-top: 10px; font-size: 13px; white-space: pre-wrap; }
     .msg.ok { color: var(--ok); }
@@ -67,6 +69,7 @@
                      background: #eef1f4; color: #57606a; text-align: right; font-variant-numeric: tabular-nums; }
     thead th.idx { z-index: 4; }
     .pager { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+    .pager input { width: 82px; font-variant-numeric: tabular-nums; }
     .pill { background: var(--bg); border: 1px solid var(--bd); border-radius: 12px; padding: 2px 10px; font-size: 12px; }
   </style>
 </head>
@@ -150,6 +153,10 @@
           <label>每页</label>
           <input id="qPageSize" type="number" value="50" min="1" />
         </div>
+        <div class="field">
+          <label>税费</label>
+          <label class="checkline"><input id="qIncludeTax" type="checkbox" checked /><span>含税</span></label>
+        </div>
         <button id="qBtn">查询</button>
         <button type="button" class="secondary" id="exportBtn">导出 CSV</button>
       </div>
@@ -159,10 +166,13 @@
         <button type="button" class="secondary" id="copyCurl">复制 curl</button>
       </div>
       <div id="qMsg" class="msg"></div>
+      <div id="qSummary" class="meta"></div>
       <div class="pager" id="pager" style="display:none">
         <button class="secondary" id="prevBtn">上一页</button>
         <span class="pill" id="pageInfo"></span>
         <button class="secondary" id="nextBtn">下一页</button>
+        <input id="pageJump" type="number" min="1" value="1" aria-label="目标页码" />
+        <button class="secondary" id="pageJumpBtn">跳转</button>
         <span class="pill" id="totalInfo"></span>
       </div>
       <div id="result"></div>
@@ -227,6 +237,7 @@
         msg.className = "msg err"; msg.textContent = "账期格式应为 YYYY-MM，例如 2026-06"; return;
       }
       btn.disabled = true; msg.className = "msg"; msg.textContent = "拉取中…";
+      const started = performance.now();
       try {
         const body = { dataset: segValue("ingDs"), period };
         const sub = $("ingSub").value; if (sub) body.subscription = sub;
@@ -234,13 +245,33 @@
           method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
         });
         const j = await r.json();
-        if (!r.ok) throw new Error(j.detail || JSON.stringify(j));
+        if (!r.ok) throw new Error(errorDetail(j));
         msg.className = "msg ok";
-        msg.textContent = "完成，共 " + j.totalRows + " 行\n" +
+        msg.textContent = `完成，共 ${j.totalRows} 行 · ${timingText(j.elapsedMs, performance.now() - started)}\n` +
           j.results.map(x => `  ${x.subscriptionKey} ${x.dataset} ${x.period}: ${x.status} (${x.rows} 行)`).join("\n");
       } catch (e) {
-        msg.className = "msg err"; msg.textContent = "失败：" + e.message;
+        msg.className = "msg err";
+        msg.textContent = `失败：${e.message}\n端到端 ${((performance.now() - started) / 1000).toFixed(2)}s`;
       } finally { btn.disabled = false; }
+    }
+
+     function errorDetail(body) {
+       const detail = body && body.detail;
+       if (typeof detail === "string") return detail;
+       if (detail && typeof detail === "object") {
+         const violations = detail.violations
+           ? Object.entries(detail.violations).map(([field, count]) => `${field}=${count}`).join(", ")
+           : "";
+         return [detail.message || detail.code, violations].filter(Boolean).join("\n");
+       }
+       return JSON.stringify(body);
+     }
+
+    function timingText(serverMs, clientMs) {
+      const parts = [];
+      if (Number.isFinite(serverMs)) parts.push(`服务端 ${(serverMs / 1000).toFixed(2)}s`);
+      if (Number.isFinite(clientMs)) parts.push(`端到端 ${(clientMs / 1000).toFixed(2)}s`);
+      return parts.join(" · ");
     }
 
     async function doQuery(page) {
@@ -256,22 +287,42 @@
       state.pageSize = parseInt($("qPageSize").value, 10) || 50;
       refreshUrl();
       btn.disabled = true; msg.className = "msg"; msg.textContent = "查询中…";
+      $("qSummary").textContent = "";
       $("result").innerHTML = ""; $("pager").style.display = "none";
+      const started = performance.now();
       try {
         const params = new URLSearchParams();
         params.set("cloud", $("qCloud").value);
         params.set("page", state.page);
         params.set("pageSize", state.pageSize);
+        params.set("includeTax", $("qIncludeTax").checked);
         if (ds === "daily") params.set("date", $("qDate").value.trim());
         else params.set("month", $("qMonth").value.trim());
         const subId = $("qSubId").value.trim(); if (subId) params.set("subscriptionId", subId);
         const r = await fetch(`/api/v1/billing/${ds}?` + params.toString());
         const j = await r.json();
-        if (!r.ok) throw new Error(j.detail || JSON.stringify(j));
-        renderTable(j); msg.textContent = "";
+        if (!r.ok) throw new Error(errorDetail(j));
+        renderTable(j);
+        renderSummary(j.summary);
+        msg.className = "msg ok";
+        msg.textContent = `查询完成 · ${timingText(j.elapsedMs, performance.now() - started)}`;
       } catch (e) {
-        msg.className = "msg err"; msg.textContent = "失败：" + e.message;
+        msg.className = "msg err";
+        msg.textContent = `失败：${e.message}\n端到端 ${((performance.now() - started) / 1000).toFixed(2)}s`;
       } finally { btn.disabled = false; }
+    }
+
+    function renderSummary(summary) {
+      if (!summary || !summary.costsByCurrency?.length) {
+        $("qSummary").textContent = "完整查询总费用：无数据";
+        return;
+      }
+      const formatter = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 6 });
+      const costs = summary.costsByCurrency
+        .map(item => `${item.billingCurrency} ${formatter.format(item.totalBilledCost)}`)
+        .join(" · ");
+      const taxLabel = summary.includesDerivedTax ? "含派生税费" : "不含派生税费";
+      $("qSummary").textContent = `完整查询总费用（BilledCost）：${costs} · ${taxLabel}`;
     }
 
     function csvCell(v) {
@@ -293,6 +344,7 @@
         const params = new URLSearchParams();
         params.set("cloud", $("qCloud").value);
         params.set("pageSize", 1000);
+        params.set("includeTax", $("qIncludeTax").checked);
         if (ds === "daily") params.set("date", $("qDate").value.trim());
         else params.set("month", $("qMonth").value.trim());
         const subId = $("qSubId").value.trim(); if (subId) params.set("subscriptionId", subId);
@@ -303,7 +355,7 @@
           params.set("page", page);
           const r = await fetch(`/api/v1/billing/${ds}?` + params.toString());
           const j = await r.json();
-          if (!r.ok) throw new Error(j.detail || JSON.stringify(j));
+          if (!r.ok) throw new Error(errorDetail(j));
           all.push(...j.data);
           totalPages = j.pagination.totalPages || 1;
           page += 1;
@@ -332,6 +384,8 @@
       const p = j.pagination; state.totalPages = p.totalPages;
       $("pager").style.display = "flex";
       $("pageInfo").textContent = `第 ${p.page} / ${p.totalPages || 1} 页`;
+      $("pageJump").value = p.page;
+      $("pageJump").max = Math.max(p.totalPages, 1);
       $("totalInfo").textContent = `共 ${p.total} 行`;
       $("prevBtn").disabled = p.page <= 1;
       $("nextBtn").disabled = p.page >= p.totalPages;
@@ -359,6 +413,18 @@
       wrap.querySelectorAll("tr.names th").forEach(th => { th.style.top = h1 + "px"; });
     }
 
+    function jumpToPage() {
+      const page = Number.parseInt($("pageJump").value, 10);
+      const totalPages = Math.max(state.totalPages, 1);
+      if (!Number.isInteger(page) || page < 1 || page > totalPages) {
+        const msg = $("qMsg");
+        msg.className = "msg err";
+        msg.textContent = `页码应在 1 到 ${totalPages} 之间`;
+        return;
+      }
+      doQuery(page);
+    }
+
     function syncFields() {
       const ds = segValue("qDs");
       const dailyOn = ds === "daily";
@@ -378,6 +444,7 @@
       const subId = $("qSubId").value.trim(); if (subId) params.set("subscriptionId", subId);
       params.set("page", state.page || 1);
       params.set("pageSize", $("qPageSize").value || 50);
+      params.set("includeTax", $("qIncludeTax").checked);
       return `${location.origin}/api/v1/billing/${ds}?` + params.toString();
     }
 
@@ -419,15 +486,17 @@
     async function doRefresh() {
       const btn = $("refreshBtn"), msg = $("refreshMsg");
       btn.disabled = true; msg.className = "msg"; msg.textContent = "刷新中…（读 Raw → 写 Curated）";
+      const started = performance.now();
       try {
         const j = await fetch("/api/v1/admin/refresh", { method: "POST" }).then(r => r.json());
         if (j.detail) throw new Error(j.detail);
         msg.className = "msg ok";
-        msg.textContent = `完成：daily=${j.dailyPeriod} monthly=${j.monthlyPeriod}，共 ${j.totalRows} 行\n` +
+        msg.textContent = `完成：daily=${j.dailyPeriod} monthly=${j.monthlyPeriod}，共 ${j.totalRows} 行 · ${timingText(j.elapsedMs, performance.now() - started)}\n` +
           j.results.map(x => `  ${x.subscriptionKey || "-"} ${x.dataset} ${x.period}: ${x.status} (${x.rows || 0} 行)`).join("\n");
         loadStatus();
       } catch (e) {
-        msg.className = "msg err"; msg.textContent = "失败：" + e.message;
+        msg.className = "msg err";
+        msg.textContent = `失败：${e.message}\n端到端 ${((performance.now() - started) / 1000).toFixed(2)}s`;
       } finally { btn.disabled = false; }
     }
 
@@ -436,9 +505,14 @@
     $("exportBtn").onclick = doExport;
     $("prevBtn").onclick = () => doQuery(state.page - 1);
     $("nextBtn").onclick = () => doQuery(state.page + 1);
+    $("pageJumpBtn").onclick = jumpToPage;
+    $("pageJump").onkeydown = (event) => {
+      if (event.key === "Enter") jumpToPage();
+    };
     $("qDataset").addEventListener("change", syncFields);
     ["qCloud", "qDate", "qMonth", "qSubId", "qPageSize"].forEach(id =>
       $(id).addEventListener("input", refreshUrl));
+    $("qIncludeTax").addEventListener("change", refreshUrl);
     $("qCloud").addEventListener("change", () => { populateQuerySubs(); refreshUrl(); });
     $("copyUrl").onclick = (e) => copy(buildQueryUrl(), e.target);
     $("copyCurl").onclick = (e) => copy(`curl "${buildQueryUrl()}"`, e.target);

@@ -17,22 +17,22 @@ from datetime import date, datetime, timedelta
 import duckdb
 
 from app.config import SubscriptionConfig, get_settings
-from app.db import get_connection, write_partition
+from app.db import get_connection, write_partition, write_tax_basis_partition
 from app.schema import FOCUS_1_3_COLUMNS
 
 SERVICES = [
-    ("Virtual Machines", "Compute"),
-    ("Azure SQL Database", "Databases"),
-    ("Storage Accounts", "Storage"),
-    ("Azure Kubernetes Service", "Compute"),
-    ("Application Gateway", "Networking"),
+    ("Virtual Machines", "Compute", "Virtual Machines"),
+    ("Azure SQL Database", "Databases", "Relational Databases"),
+    ("Storage Accounts", "Storage", "Object Storage"),
+    ("Azure Kubernetes Service", "Compute", "Containers"),
+    ("Application Gateway", "Networking", "Network Connectivity"),
 ]
 REGIONS = [("eastus", "East US"), ("chinaeast2", "China East 2"), ("westeurope", "West Europe")]
 CHARGE_CATEGORIES = ["Usage", "Purchase", "Tax"]
 
 
 def _row(sub: SubscriptionConfig, charge_start: datetime, charge_end: datetime) -> dict:
-    svc, cat = random.choice(SERVICES)
+    svc, cat, subcategory = random.choice(SERVICES)
     region_id, region_name = random.choice(REGIONS)
     qty = round(random.uniform(0.5, 100), 4)
     unit_price = round(random.uniform(0.01, 5), 6)
@@ -67,6 +67,7 @@ def _row(sub: SubscriptionConfig, charge_start: datetime, charge_end: datetime) 
             "ProviderName": "Microsoft",
             "PublisherName": "Microsoft",
             "InvoiceIssuerName": "Microsoft",
+            "ServiceProviderName": "Microsoft",
             "RegionId": region_id,
             "RegionName": region_name,
             "ResourceId": f"/subscriptions/{sub.subscription_id}/resourceGroups/{rg}/providers/{svc}/res-{random.randint(1, 50)}",
@@ -74,6 +75,7 @@ def _row(sub: SubscriptionConfig, charge_start: datetime, charge_end: datetime) 
             "ResourceType": svc,
             "ServiceName": svc,
             "ServiceCategory": cat,
+            "ServiceSubcategory": subcategory,
             "SkuId": f"sku-{random.randint(1000, 9999)}",
             "SkuPriceId": f"price-{random.randint(1000, 9999)}",
             "SubAccountId": sub.subscription_id,
@@ -117,6 +119,15 @@ def _write(con: duckdb.DuckDBPyConnection, sub, dataset, period, records) -> Non
         subscription_key=sub.subscription_key,
         period=period,
         select_sql="SELECT * FROM tmp_sample",
+    )
+    write_tax_basis_partition(
+        con,
+        settings,
+        dataset=dataset,
+        cloud=sub.cloud,
+        subscription_key=sub.subscription_key,
+        period=period,
+        source_sql="SELECT * FROM tmp_sample",
     )
     con.unregister("tmp_sample")
     print(f"  [ok] {sub.subscription_key} {dataset} {period}: {n} rows -> {location}")

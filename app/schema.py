@@ -135,6 +135,45 @@ CHARGE_PERIOD_START = "ChargePeriodStart"
 CHARGE_PERIOD_END = "ChargePeriodEnd"
 BILLING_PERIOD_START = "BillingPeriodStart"
 
+# Customer-required core fields. ResourceId is conditionally required for
+# resource-related charges; all others must always contain a valid value.
+CORE_COST_COLUMNS: tuple[str, ...] = (
+  "BilledCost",
+  "EffectiveCost",
+  "ListCost",
+  "ContractedCost",
+)
+CORE_TIME_COLUMNS: tuple[str, ...] = (
+  "BillingPeriodStart",
+  "BillingPeriodEnd",
+  "ChargePeriodStart",
+  "ChargePeriodEnd",
+)
+CORE_STRING_COLUMNS: tuple[str, ...] = (
+  "BillingAccountId",
+  "BillingCurrency",
+  "ChargeCategory",
+  "ServiceCategory",
+  "ServiceSubcategory",
+  "ServiceName",
+  "ServiceProviderName",
+  "InvoiceIssuerName",
+  "ProviderName",
+  "PublisherName",
+)
+NON_RESOURCE_CHARGE_CATEGORIES: tuple[str, ...] = (
+  "Tax",
+  "Credit",
+  "Adjustment",
+)
+VALID_CHARGE_CATEGORIES: tuple[str, ...] = (
+  "Usage",
+  "Purchase",
+  "Tax",
+  "Credit",
+  "Adjustment",
+)
+
 
 def build_normalization_select(
     source_columns: list[str], include_extension_columns: bool = True
