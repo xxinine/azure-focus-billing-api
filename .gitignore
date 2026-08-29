@@ -8,5 +8,6 @@ data/
 .pytest_cache/
 *.duckdb
 output/
+.cache/
 .DS_Store
 config/subscriptions_*.json

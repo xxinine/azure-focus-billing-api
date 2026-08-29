@@ -56,6 +56,13 @@ CURATED_ACCOUNT_URL=
 CURATED_CONTAINER=
 CURATED_PREFIX=curated/focus
 TAX_BASIS_PREFIX=curated/tax-basis
+# 查询时按 ETag 缓存 Curated Parquet 到本地；Blob 更新后自动失效。
+BLOB_CACHE_ENABLED=true
+BLOB_CACHE_DIR=./.cache/azure-blob
+BLOB_CACHE_DOWNLOAD_CONCURRENCY=4
+BLOB_CACHE_MAX_SIZE_MB=10240
+BLOB_CACHE_MAX_UNUSED_DAYS=30
+BLOB_CACHE_MIN_FREE_SPACE_MB=2048
 
 # ---- 鉴权 ----
 AZURE_STORAGE_AUTH_MODE=service_principal   # service_principal | managed_identity | sas | connection_string
@@ -88,6 +95,12 @@ SCHEDULER_ENABLED=true
 | `CURATED_ACCOUNT_URL` / `CURATED_CONTAINER` | 规整层存储；留空则复用原始账户/容器 |
 | `CURATED_PREFIX` | 规整层路径前缀 |
 | `TAX_BASIS_PREFIX` | 按订阅、账期、服务预计算的税基汇总路径前缀 |
+| `BLOB_CACHE_ENABLED` | 是否将 Azure Curated Parquet 按 ETag 缓存到本地，默认 `true` |
+| `BLOB_CACHE_DIR` | 本地 Blob 查询缓存目录；需预留当前查询工作集所需磁盘空间 |
+| `BLOB_CACHE_DOWNLOAD_CONCURRENCY` | 单个 Blob 下载并发度，默认 `4`，范围 `1` 到 `32` |
+| `BLOB_CACHE_MAX_SIZE_MB` | 缓存文件总容量硬上限，默认 `10240` MiB（10 GiB） |
+| `BLOB_CACHE_MAX_UNUSED_DAYS` | 文件连续未被查询后淘汰，默认 `30` 天 |
+| `BLOB_CACHE_MIN_FREE_SPACE_MB` | 缓存盘必须保留的最小可用空间，默认 `2048` MiB（2 GiB） |
 | `AZURE_STORAGE_AUTH_MODE` | 鉴权方式，四选一 |
 | `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` | `service_principal` 必填（或用 `AZURE_CLIENT_CERTIFICATE_PATH` 证书） |
 | `FOCUS_SUBSCRIPTIONS_CONFIG_FILE` | 本云订阅清单文件路径 |
@@ -95,6 +108,10 @@ SCHEDULER_ENABLED=true
 | `TAX_RATE` | 税率小数，范围 `0` 到 `1`，例如 `0.06` 表示 6% |
 
 **权限（最小化）**：给该身份在存储账户上授 **Storage Blob Data Contributor**（读原始 + 写 curated）。若 curated 在另一账户，则两个账户都授。Azure 上运行可改用 Managed Identity（`managed_identity`，无需密钥）。
+
+查询缓存每次先读取 Blob 元数据；ETag 与文件大小未变化时直接查询本地 Parquet，变化时条件下载并原子替换缓存。系统每 5 分钟至多执行一次维护：先清理超过 `BLOB_CACHE_MAX_UNUSED_DAYS` 未使用的文件，再按最久未使用顺序淘汰，确保不超过 `BLOB_CACHE_MAX_SIZE_MB`，并始终为缓存所在文件系统保留 `BLOB_CACHE_MIN_FREE_SPACE_MB`。下载前会跨进程预留容量；单个 Blob 过大或磁盘空间不足时自动绕过本地缓存，直接从 Azure 查询，不会因缓存限制导致请求失败。
+
+生产环境建议将 `BLOB_CACHE_DIR` 放在独立数据盘或容器持久卷，而不是系统根分区。容量上限应小于该卷可分配给服务的空间，最低空闲空间应覆盖日志、临时下载及系统运维余量。例如 20 GiB 专用卷可从 `BLOB_CACHE_MAX_SIZE_MB=10240`、`BLOB_CACHE_MIN_FREE_SPACE_MB=4096` 起步。缓存目录包含账单数据，应仅允许服务账号访问；容器多实例部署时每个实例维护独立缓存即可。
 
 > **China 部署**：使用 Azure China（世纪互联）租户下的 Service Principal 与存储账户，`BLOB_ACCOUNT_URL` 填 `*.blob.core.chinacloudapi.cn` 即可；代码自动使用中国云的 AAD 授权终结点（`login.chinacloudapi.cn`）与存储终结点。China 与 Global 各自独立部署，配置互不共用。
 
@@ -185,7 +202,7 @@ python -m ingestion.tax_basis --dataset monthly --period 2026-07 --subscription 
 python -m ingestion.tax_basis --dataset daily --period 2026-08 --subscription <subscriptionKey>
 ```
 - 税基只排除已有的 `Tax`；`Credit` 和 `Adjustment` 仍参与计算。`BilledCost`、`EffectiveCost`、`ListCost`、`ContractedCost` 分别按自身汇总值乘以 `TAX_RATE`，结果保留 6 位小数。
-- API 查询阶段校验 19 个核心字段。字符串不得为 `null`、空字符串或全空格，金额必须是有限数值，账期和费用结束时间必须晚于开始时间；资源相关费用必须提供 `ResourceId`，`Tax`、`Credit`、`Adjustment` 允许为空。
+- API 查询阶段校验 19 个核心字段。字符串不得为 `null`、空字符串或全空格，金额必须是有限数值，账期和费用结束时间必须晚于开始时间；当 `ResourceName` 或 `ResourceType` 表明费用关联到可识别资源时，必须提供 `ResourceId`。账户级、支持类等无资源上下文的费用允许 `ResourceId` 为空。
 - `ServiceCategory` 和 `ServiceSubcategory` 均要求非空，但保留 Azure 返回的原始值，不校验 FOCUS 枚举或父子关系。同一 `ServiceName` 生成税费时，其账户、币种、服务分类和开票主体必须一致，否则返回 `BILLING_DATA_QUALITY_ERROR`，避免生成归属不明确的税费。
 
 ## 每日自动拉取

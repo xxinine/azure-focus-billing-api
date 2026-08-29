@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import random
 from collections import defaultdict
 from datetime import datetime, timedelta
 
@@ -358,8 +359,39 @@ def test_tax_rows_satisfy_core_field_contract(client, tax_enabled):
     for row in rows:
         assert all(row[field] is not None for field in required_fields)
         assert all(str(row[field]).strip() for field in string_fields)
-        if row["ChargeCategory"] not in ("Tax", "Credit", "Adjustment"):
+        if row["ResourceName"] or row["ResourceType"]:
             assert str(row["ResourceId"]).strip()
+
+
+def test_resource_id_is_required_only_for_identifiable_resources():
+    import duckdb
+
+    from app.config import SubscriptionConfig
+    from app.db import BillingDataQualityError, _validate_core_fields
+    from scripts.gen_sample import _as_relation, _row
+
+    sub = SubscriptionConfig.model_validate(SUBS[0])
+    start = datetime(2026, 6, 1)
+    random_state = random.getstate()
+    try:
+        record = _row(sub, start, start + timedelta(days=1))
+    finally:
+        random.setstate(random_state)
+    record["ChargeCategory"] = "Purchase"
+    record["ResourceId"] = None
+    record["ResourceName"] = None
+    record["ResourceType"] = None
+    con = duckdb.connect(":memory:")
+    con.register("charges", _as_relation(con, [record], list(record)))
+
+    _validate_core_fields(con, "SELECT * FROM charges", [])
+
+    record["ResourceType"] = "Virtual Machine"
+    con.unregister("charges")
+    con.register("charges", _as_relation(con, [record], list(record)))
+    with pytest.raises(BillingDataQualityError) as exc_info:
+        _validate_core_fields(con, "SELECT * FROM charges", [])
+    assert exc_info.value.violations == {"ResourceId": 1}
 
 
 def test_tax_basis_excludes_only_existing_tax():
@@ -401,6 +433,7 @@ def test_tax_group_allows_multiple_non_currency_contexts():
     sub = SubscriptionConfig.model_validate(SUBS[0])
     start = datetime(2026, 6, 1)
     base = _row(sub, start, start + timedelta(days=1))
+    base["ChargeCategory"] = "Usage"
     base["ServiceName"] = "Virtual Machines"
     records = []
     contexts = (
@@ -431,6 +464,7 @@ def test_tax_group_rejects_multiple_currencies():
     sub = SubscriptionConfig.model_validate(SUBS[0])
     start = datetime(2026, 6, 1)
     base = _row(sub, start, start + timedelta(days=1))
+    base["ChargeCategory"] = "Usage"
     base["ServiceName"] = "Virtual Machines"
     records = []
     for currency in ("USD", "CNY"):

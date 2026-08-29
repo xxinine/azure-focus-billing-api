@@ -16,7 +16,6 @@ from .schema import (
     CORE_COST_COLUMNS,
     CORE_STRING_COLUMNS,
     CORE_TIME_COLUMNS,
-    NON_RESOURCE_CHARGE_CATEGORIES,
     VALID_CHARGE_CATEGORIES,
 )
 
@@ -271,10 +270,22 @@ def _tax_basis_glob_for(
 
 
 def _scan_expr(globs: list[str]) -> str:
-    files = ", ".join(f"'{g}'" for g in globs)
+    files = ", ".join(_q(path) for path in globs)
     return (
         f"read_parquet([{files}], union_by_name=true, "
         f"hive_partitioning=true, filename=false)"
+    )
+
+
+def _resolve_read_files(settings: Settings, globs: list[str]) -> list[str]:
+    if settings.storage_backend != "azure_blob":
+        return globs
+    from .storage import cache_azure_parquet_globs
+
+    return cache_azure_parquet_globs(
+        settings,
+        settings.curated_account_url_effective,
+        globs,
     )
 
 
@@ -389,7 +400,14 @@ def rebuild_tax_basis_partition(
     sub: SubscriptionConfig,
     period: str,
 ) -> tuple[str, int]:
-    source_sql = f"SELECT * FROM {_scan_expr(_glob_for(settings, dataset, [sub], period))}"
+    files = _resolve_read_files(
+        settings, _glob_for(settings, dataset, [sub], period)
+    )
+    if not files:
+        raise FileNotFoundError(
+            f"curated partition not found: {dataset}/{sub.subscription_key}/{period}"
+        )
+    source_sql = f"SELECT * FROM {_scan_expr(files)}"
     return write_tax_basis_partition(
         con,
         settings,
@@ -419,9 +437,6 @@ def _validate_core_fields(
         )
 
     allowed_categories = ", ".join(_q(value) for value in VALID_CHARGE_CATEGORIES)
-    non_resource_categories = ", ".join(
-        _q(value) for value in NON_RESOURCE_CHARGE_CATEGORIES
-    )
     checks.extend(
         [
             (
@@ -445,7 +460,8 @@ def _validate_core_fields(
             ),
             (
                 "ResourceId",
-                f'"ChargeCategory" NOT IN ({non_resource_categories}) AND '
+                "(NULLIF(trim(CAST(\"ResourceName\" AS VARCHAR)), '') IS NOT NULL OR "
+                "NULLIF(trim(CAST(\"ResourceType\" AS VARCHAR)), '') IS NOT NULL) AND "
                 '("ResourceId" IS NULL OR trim(CAST("ResourceId" AS VARCHAR)) = \'\')',
             ),
         ]
@@ -552,11 +568,11 @@ def query_billing(
     """Run a partition-pruned query. Returns rows, total, and cost summary."""
     settings = get_settings()
     con = get_connection()
-    globs = _glob_for(settings, dataset, subs, period)
-    if not globs:
+    files = _resolve_read_files(settings, _glob_for(settings, dataset, subs, period))
+    if not files:
         return [], 0, {"costsByCurrency": [], "includesDerivedTax": False}
 
-    scan = _scan_expr(globs)
+    scan = _scan_expr(files)
     raw_base = f"SELECT * FROM {scan} WHERE {where_sql}"
     base = _normalize_core_fields(raw_base)
 
@@ -594,22 +610,29 @@ def query_billing(
             fallback_sql = _tax_rows_sql(tax_base, str(settings.tax_rate))
             return fallback_sql, [], tax_stats(fallback_sql, [])
 
-        basis_scan = _scan_expr(_tax_basis_glob_for(settings, dataset, subs, period))
         tax_where_sql = _inline_sql_params(where_sql, where_params)
-        basis = f"SELECT * FROM {basis_scan} WHERE {tax_where_sql}"
-        try:
-            _validate_tax_group_context(con, basis, [])
-            tax_sql = _tax_rows_sql(basis, str(settings.tax_rate))
-            tax_params = []
-            tax_costs = tax_stats(tax_sql, tax_params)
-            tax_total = sum(int(row_count) for _, row_count, _ in tax_costs)
-            if tax_total == 0 and detail_total > 0:
-                tax_sql, tax_params, tax_costs = use_detail_tax_fallback()
-                tax_total = sum(int(row_count) for _, row_count, _ in tax_costs)
-        except duckdb.IOException:
-            # Existing curated partitions may predate tax-basis generation.
+        basis_files = _resolve_read_files(
+            settings, _tax_basis_glob_for(settings, dataset, subs, period)
+        )
+        if not basis_files:
             tax_sql, tax_params, tax_costs = use_detail_tax_fallback()
             tax_total = sum(int(row_count) for _, row_count, _ in tax_costs)
+        else:
+            basis_scan = _scan_expr(basis_files)
+            basis = f"SELECT * FROM {basis_scan} WHERE {tax_where_sql}"
+            try:
+                _validate_tax_group_context(con, basis, [])
+                tax_sql = _tax_rows_sql(basis, str(settings.tax_rate))
+                tax_params = []
+                tax_costs = tax_stats(tax_sql, tax_params)
+                tax_total = sum(int(row_count) for _, row_count, _ in tax_costs)
+                if tax_total == 0 and detail_total > 0:
+                    tax_sql, tax_params, tax_costs = use_detail_tax_fallback()
+                    tax_total = sum(int(row_count) for _, row_count, _ in tax_costs)
+            except duckdb.IOException:
+                # Existing curated partitions may predate tax-basis generation.
+                tax_sql, tax_params, tax_costs = use_detail_tax_fallback()
+                tax_total = sum(int(row_count) for _, row_count, _ in tax_costs)
 
     costs_by_currency: dict[str, Decimal] = {}
     for currency, _, billed_cost in [*detail_costs, *tax_costs]:

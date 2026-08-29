@@ -161,11 +161,6 @@ CORE_STRING_COLUMNS: tuple[str, ...] = (
   "ProviderName",
   "PublisherName",
 )
-NON_RESOURCE_CHARGE_CATEGORIES: tuple[str, ...] = (
-  "Tax",
-  "Credit",
-  "Adjustment",
-)
 VALID_CHARGE_CATEGORIES: tuple[str, ...] = (
   "Usage",
   "Purchase",

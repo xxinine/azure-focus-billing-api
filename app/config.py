@@ -57,6 +57,14 @@ class Settings(BaseSettings):
     storage_backend: Literal["azure_blob", "local"] = "azure_blob"
     local_data_root: str = "./data"
 
+    # Query cache for curated Azure Blob parquet files.
+    blob_cache_enabled: bool = True
+    blob_cache_dir: str = "./.cache/azure-blob"
+    blob_cache_download_concurrency: int = Field(default=4, ge=1, le=32)
+    blob_cache_max_size_mb: int = Field(default=10240, ge=1)
+    blob_cache_max_unused_days: int = Field(default=30, ge=1)
+    blob_cache_min_free_space_mb: int = Field(default=2048, ge=0)
+
     # Subscriptions can be configured EITHER via a YAML/JSON file (recommended,
     # readable, supports comments) OR inline JSON (handy for containers). If both
     # are set, the inline JSON takes precedence as an override.
