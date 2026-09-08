@@ -10,12 +10,18 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 
 import duckdb
 
 from app.config import SubscriptionConfig, get_settings
 from app.db import get_connection, write_partition, write_tax_basis_partition
 from app.schema import build_normalization_select
+
+
+def _log(message: str) -> None:
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    print(f"{timestamp} {message}")
 
 
 def _raw_glob(settings, sub: SubscriptionConfig, dataset: str, period: str) -> str:
@@ -38,6 +44,7 @@ def ingest_partition(
 ) -> dict:
     settings = get_settings()
     raw_glob = _raw_glob(settings, sub, dataset, period)
+    _log(f"[start] billing {sub.subscription_key} {dataset} {period}")
 
     try:
         desc = con.execute(
@@ -50,7 +57,7 @@ def ingest_partition(
         # must surface instead of being silently reported as missing data.
         if "no files found" not in str(exc).lower():
             raise
-        print(f"  [skip] no raw files: {raw_glob}")
+        _log(f"[skip] no raw files: {raw_glob}")
         return {
             "subscriptionKey": sub.subscription_key,
             "cloud": sub.cloud,
@@ -77,6 +84,8 @@ def ingest_partition(
         period=period,
         select_sql=select_sql,
     )
+    _log(f"[ok] billing {sub.subscription_key} {dataset} {period}: {count} rows -> {location}")
+    _log(f"[start] tax basis {sub.subscription_key} {dataset} {period}")
     tax_basis_location, tax_basis_rows = write_tax_basis_partition(
         con,
         settings,
@@ -86,7 +95,10 @@ def ingest_partition(
         period=period,
         source_sql=select_sql,
     )
-    print(f"  [ok] {sub.subscription_key} {dataset} {period}: {count} rows -> {location}")
+    _log(
+        f"[ok] tax basis {sub.subscription_key} {dataset} {period}: "
+        f"{tax_basis_rows} rows -> {tax_basis_location}"
+    )
     return {
         "subscriptionKey": sub.subscription_key,
         "cloud": sub.cloud,
